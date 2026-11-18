@@ -140,7 +140,9 @@ h1{font-size:24px;font-weight:800;letter-spacing:-.02em;color:#1c1917;margin-bot
   <div class="sec-btns">
     <button class="sec-btn" onclick="resetAll()">Reset</button>
     <button class="sec-btn" onclick="askExport()">Export Excel</button>
+    <button class="sec-btn" id="ddb-send" onclick="sendLatestResult()">Send latest result to DDB</button>
   </div>
+  <p id="ddb-status" role="status"></p>
   <div class="history" id="hist">
     <div class="hist-head">History</div>
     <div class="hist-list" id="hlist"></div>
@@ -279,6 +281,62 @@ function calculate(){
   hist.push({s:[...s],f,t,v:val,ok,hi,time:new Date().toISOString()});
   renderHist();
 }
+let ddbEpisodeId;
+let mqttLibrary;
+
+async function sendLatestResult(){
+  const status=document.getElementById('ddb-status');
+  const button=document.getElementById('ddb-send');
+  const result=hist.at(-1);
+  if(!result){status.textContent='Calculate a result first.';return;}
+  if(result.ddbSent){status.textContent='This result was already sent.';return;}
+
+  ddbEpisodeId ??= crypto.randomUUID();
+  const payload=JSON.stringify({
+    episode_id:ddbEpisodeId,
+    attempt:hist.length,
+    roller_1_mm:result.s[0],
+    roller_2_mm:result.s[1],
+    roller_3_mm:result.s[2],
+    roller_4_mm:result.s[3],
+    roller_5_mm:result.s[4],
+    friction:result.f,
+    thickness_mm:result.t,
+    deformation:result.v,
+    passed:result.ok,
+    calculated_at:result.time
+  });
+
+  button.disabled=true;
+  status.textContent='Sending to local MQTT broker…';
+  let client;
+  try{
+    mqttLibrary ??= new Promise((resolve,reject)=>{
+      const script=document.createElement('script');
+      script.src='https://cdn.jsdelivr.net/npm/mqtt@5.10.4/dist/mqtt.min.js';
+      script.integrity='sha384-Bi12oAdYr14AFkifhhBlMiJVpDvueq9uEXPV1B+vtGzvngGIdSIi/k4kDG+YDnyY';
+      script.crossOrigin='anonymous';
+      script.onload=()=>resolve(window.mqtt);
+      script.onerror=()=>reject(new Error('Could not load MQTT client'));
+      document.head.append(script);
+    });
+    const mqtt=await mqttLibrary.catch(error=>{mqttLibrary=undefined;throw error;});
+    client=mqtt.connect('ws://127.0.0.1:8083/mqtt',{reconnectPeriod:0,connectTimeout:4000});
+    await new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>reject(new Error('Broker acknowledgement timed out')),5000);
+      const finish=error=>{clearTimeout(timer);error?reject(error):resolve();};
+      client.on('error',finish);
+      client.once('connect',()=>client.publish('mfi/simulator/result',payload,{qos:1},finish));
+    });
+    result.ddbSent=true;
+    status.textContent='Broker acknowledged the result. Check the DDB Retrieval API for storage.';
+  }catch(error){
+    status.textContent='Send failed: '+error.message;
+  }finally{
+    if(client)client.end(true);
+    button.disabled=false;
+  }
+}
 function renderHist(){
   document.getElementById('hist').className='history on';
   document.getElementById('hlist').innerHTML=[...hist].reverse().map((r,i)=>{
@@ -293,6 +351,7 @@ function resetAll(){
   document.getElementById('rb').className='result';
   document.getElementById('r-idle').style.display='block';
   document.getElementById('r-main').style.display='none';
+  ddbEpisodeId=undefined;
   hist.length=0;document.getElementById('hist').className='history';
   document.getElementById('hlist').innerHTML='';
 }
